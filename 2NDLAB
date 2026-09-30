@@ -1,0 +1,92 @@
+import random
+import math
+n = int(input("Enter number of customers: "))
+customers = []
+demand = []
+for i in range(n):
+    print("\nCustomer", i + 1)
+    x = float(input("Enter x coordinate: "))
+    y = float(input("Enter y coordinate: "))
+    d = int(input("Enter demand: "))
+    customers.append((x, y))
+    demand.append(d)
+capacity = int(input("\nEnter vehicle capacity: "))
+vehicles = int(input("Enter number of vehicles: "))
+def distance(a, b):
+    return math.sqrt((a[0] - b[0]) ** 2 +
+                     (a[1] - b[1]) ** 2)
+def fitness(route):
+    routes = []
+    current_route = []
+    load = 0
+    for customer in route:
+        if load + demand[customer] <= capacity:
+            current_route.append(customer)
+            load += demand[customer]
+        else:
+            routes.append(current_route)
+            current_route = [customer]
+            load = demand[customer]
+    if current_route:
+        routes.append(current_route)
+    penalty = max(0, len(routes) - vehicles) * 100
+    total_distance = 0
+    depot = (0, 0)
+    for r in routes:
+        if len(r) == 0:
+            continue
+        total_distance += distance(depot, customers[r[0]])
+        for i in range(len(r) - 1):
+            total_distance += distance(
+                customers[r[i]],
+                customers[r[i + 1]]
+            )
+        total_distance += distance(
+            customers[r[-1]],
+            depot
+        )
+    return total_distance + penalty
+population = []
+for i in range(20):
+    route = list(range(n))
+    random.shuffle(route)
+    population.append(route)
+for generation in range(100):
+    population.sort(key=fitness)
+    new_population = population[:2]
+    while len(new_population) < 20:
+        parent1 = random.choice(population[:10])
+        parent2 = random.choice(population[:10])
+        point = random.randint(1, n - 1)
+        child = parent1[:point]
+        for customer in parent2:
+            if customer not in child:
+                child.append(customer)
+        if random.random() < 0.2:
+            a, b = random.sample(range(n), 2)
+            child[a], child[b] = child[b], child[a]
+        new_population.append(child)
+    population = new_population
+best_route = min(population, key=fitness)
+routes = []
+current_route = []
+load = 0
+for customer in best_route:
+    if load + demand[customer] <= capacity:
+        current_route.append(customer)
+        load += demand[customer]
+    else:
+        routes.append(current_route)
+        current_route = [customer]
+        load = demand[customer]
+if current_route:
+    routes.append(current_route)
+print("\nBest customer order:",
+      [x + 1 for x in best_route])
+print("\nRoutes:")
+for i, route in enumerate(routes):
+    print("Vehicle", i + 1, ": Depot ->", end=" ")
+    for customer in route:
+        print(customer + 1, "->", end=" ")
+    print("Depot")
+print("\nTotal distance:", round(fitness(best_route), 2))
