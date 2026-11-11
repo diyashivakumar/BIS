@@ -1,0 +1,238 @@
+# 1. INSTALL LIBRARIES
+!pip install nibabel scikit-image scipy matplotlib pandas -q
+
+# 2. IMPORT LIBRARIES
+import os
+import glob
+import random
+import math
+import numpy as np
+import nibabel as nib
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from scipy.ndimage import gaussian_filter
+from skimage.transform import resize
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+random.seed(42)
+
+print("Libraries imported successfully!")
+
+# ============================================================
+# 3. GENERATE SYNTHETIC MRI DATA (Bypassing Google Drive to prevent mount errors)
+# ============================================================
+print("Generating synthetic MRI data...")
+
+def generate_synthetic_data(num_slices=100, image_size=128):
+    images = []
+    masks = []
+    for _ in range(num_slices):
+        # Create a blank image with a circular brain-like background
+        img = np.zeros((image_size, image_size))
+        y, x = np.ogrid[:image_size, :image_size]
+        center_y, center_x = image_size // 2, image_size // 2
+        brain_mask = (x - center_x)**2 + (y - center_y)**2 < (image_size // 2.5)**2
+        img[brain_mask] = 0.5
+        
+        # Add a synthetic tumor mask
+        tumor_center_y = center_y + np.random.randint(-15, 15)
+        tumor_center_x = center_x + np.random.randint(-15, 15)
+        tumor_radius = np.random.randint(10, 25)
+        tumor_mask = (x - tumor_center_x)**2 + (y - tumor_center_y)**2 < tumor_radius**2
+        
+        # Add tumor to the image (brighter intensity)
+        img[tumor_mask] = 0.9
+        
+        # Add gaussian noise and blur
+        img = gaussian_filter(img, sigma=1) + np.random.normal(0, 0.05, img.shape)
+        img = np.clip(img, 0, 1)
+        
+        images.append(img.astype(np.float32))
+        masks.append(tumor_mask.astype(np.float32))
+        
+    return np.array(images), np.array(masks)
+
+# Generate simulated datasets
+X_all, Y_all = generate_synthetic_data(num_slices=60, image_size=128)
+
+# ============================================================
+# 4. SPLIT DATASET
+# ============================================================
+X_train, X_temp, Y_train, Y_temp = train_test_split(X_all, Y_all, test_size=0.40, random_state=42)
+X_val, X_test, Y_val, Y_test = train_test_split(X_temp, Y_temp, test_size=0.50, random_state=42)
+
+print("Training data:", X_train.shape)
+print("Validation data:", X_val.shape)
+print("Testing data:", X_test.shape)
+
+# ============================================================
+# 5. DICE SCORE AND IOU
+# ============================================================
+def dice_score(actual, predicted):
+    intersection = np.sum(actual * predicted)
+    return (2 * intersection + 1e-8) / (np.sum(actual) + np.sum(predicted) + 1e-8)
+
+def iou_score(actual, predicted):
+    intersection = np.sum(actual * predicted)
+    union = np.sum(actual) + np.sum(predicted) - intersection
+    return (intersection + 1e-8) / (union + 1e-8)
+
+# ============================================================
+# 6. MRI SEGMENTATION FUNCTION
+# ============================================================
+def segment_image(image, sigma, threshold):
+    smoothed = gaussian_filter(image, sigma=sigma)
+    return (smoothed > threshold).astype(np.float32)
+
+# ============================================================
+# 7. FITNESS FUNCTION
+# ============================================================
+def fitness_function(position):
+    sigma, threshold = position
+    scores = []
+    for image, mask in zip(X_val, Y_val):
+        prediction = segment_image(image, sigma, threshold)
+        scores.append(dice_score(mask, prediction))
+    return np.mean(scores)
+
+# ============================================================
+# 8. CUCKOO SEARCH OPTIMIZATION
+# ============================================================
+class CuckooSearch:
+    def __init__(self, nests=10, iterations=20, discovery_probability=0.25, step_size=0.1):
+        self.nests = nests
+        self.iterations = iterations
+        self.pa = discovery_probability
+        self.step_size = step_size
+
+        self.lower = np.array([0.0, 0.05])
+        self.upper = np.array([2.0, 0.95])
+
+        self.population = np.random.uniform(self.lower, self.upper, (nests, 2))
+        self.fitness = np.array([fitness_function(nest) for nest in self.population])
+
+        best_index = np.argmax(self.fitness)
+        self.best_nest = self.population[best_index].copy()
+        self.best_fitness = self.fitness[best_index]
+        self.history = []
+
+    def levy_flight(self):
+        beta = 1.5
+        sigma_u = (math.gamma(1 + beta) * np.sin(np.pi * beta / 2) / 
+                   (math.gamma((1 + beta) / 2) * beta * 2 ** ((beta - 1) / 2))) ** (1 / beta)
+        u = np.random.normal(0, sigma_u, 2)
+        v = np.random.normal(0, 1, 2)
+        step = u / (np.abs(v) ** (1 / beta) + 1e-8)
+        return step
+
+    def optimize(self):
+        for iteration in range(self.iterations):
+            for i in range(self.nests):
+                step = self.levy_flight()
+                new_nest = self.population[i] + self.step_size * step * (self.population[i] - self.best_nest)
+                new_nest = np.clip(new_nest, self.lower, self.upper)
+                new_fitness = fitness_function(new_nest)
+
+                j = random.randint(0, self.nests - 1)
+                if new_fitness > self.fitness[j]:
+                    self.population[j] = new_nest
+                    self.fitness[j] = new_fitness
+
+            abandoned = np.random.random(self.nests) < self.pa
+            for i in range(self.nests):
+                if abandoned[i]:
+                    self.population[i] = np.random.uniform(self.lower, self.upper)
+                    self.fitness[i] = fitness_function(self.population[i])
+
+            best_index = np.argmax(self.fitness)
+            if self.fitness[best_index] > self.best_fitness:
+                self.best_fitness = self.fitness[best_index]
+                self.best_nest = self.population[best_index].copy()
+
+            self.history.append(self.best_fitness)
+            print(f"Iteration {iteration + 1}/{self.iterations} | Best Dice: {self.best_fitness:.4f}")
+
+        return self.best_nest, self.best_fitness
+
+# ============================================================
+# 9. RUN CUCKOO SEARCH
+# ============================================================
+print("\nStarting Cuckoo Search Optimization...")
+cs = CuckooSearch(nests=10, iterations=20, discovery_probability=0.25, step_size=0.1)
+best_parameters, best_score = cs.optimize()
+
+best_sigma, best_threshold = best_parameters[0], best_parameters[1]
+
+print("\n========== OPTIMIZATION RESULTS ==========")
+print("Best Sigma:", best_sigma)
+print("Best Threshold:", best_threshold)
+print("Best Validation Dice:", best_score)
+
+# ============================================================
+# 10. TEST DATA EVALUATION
+# ============================================================
+dice_results = []
+iou_results = []
+
+for image, mask in zip(X_test, Y_test):
+    prediction = segment_image(image, best_sigma, best_threshold)
+    dice_results.append(dice_score(mask, prediction))
+    iou_results.append(iou_score(mask, prediction))
+
+mean_dice = np.mean(dice_results)
+mean_iou = np.mean(iou_results)
+
+print("\n========== FINAL TEST RESULTS ==========")
+print("Average Dice Score:", round(mean_dice, 4))
+print("Average IoU:", round(mean_iou, 4))
+
+# ============================================================
+# 11. VISUALIZE MRI SEGMENTATION
+# ============================================================
+index = 0
+prediction = segment_image(X_test[index], best_sigma, best_threshold)
+
+plt.figure(figsize=(15, 5))
+plt.subplot(1, 3, 1)
+plt.imshow(X_test[index], cmap="gray")
+plt.title("Original MRI")
+plt.axis("off")
+
+plt.subplot(1, 3, 2)
+plt.imshow(Y_test[index], cmap="gray")
+plt.title("Actual Tumour Mask")
+plt.axis("off")
+
+plt.subplot(1, 3, 3)
+plt.imshow(prediction, cmap="gray")
+plt.title("Cuckoo Search Segmentation")
+plt.axis("off")
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# 12. CONVERGENCE GRAPH
+# ============================================================
+plt.figure(figsize=(8, 5))
+plt.plot(range(1, len(cs.history) + 1), cs.history, marker="o", color="green")
+plt.xlabel("Iterations")
+plt.ylabel("Best Validation Dice Score")
+plt.title("Cuckoo Search Convergence Graph")
+plt.grid(True)
+plt.show()
+
+# ============================================================
+# 13. SAVE RESULTS
+# ============================================================
+results = pd.DataFrame({
+    "Metric": ["Best Sigma", "Best Threshold", "Validation Dice", "Test Dice", "Test IoU"],
+    "Value": [best_sigma, best_threshold, best_score, mean_dice, mean_iou]
+})
+
+results.to_csv("/content/Cuckoo_Search_MRI_Results.csv", index=False)
+print("\n========== FINAL SUMMARY ==========")
+print(results)
+print("\nResults saved successfully! File: Cuckoo_Search_MRI_Results.csv")
+print("\nCUCKOO SEARCH OPTIMIZATION COMPLETED!")
